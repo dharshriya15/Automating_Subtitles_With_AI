@@ -1,8 +1,8 @@
-🎥 Video Subtitle Processor
+🎥 <b>Video Subtitle Processor</b>
 
 The Video Subtitle Processor is a simple tool that lets you upload your videos and automatically generate subtitles using AI. 
 
-✨ What You Can Do
+✨ <b>What You Can Do</b>
 
 Upload videos in popular formats: MP4, AVI, MOV, MKV, WMV, FLV, WebM
 
@@ -14,17 +14,17 @@ Track the processing status of your videos
 
 Download videos with subtitles or separate subtitle files
 
-🖥️ How It Works
+🖥️ <b>How It Works</b>
 
 Clone this Repository
 
 Copy .env file and add credentials
 
-for Backend:
+<b>for Backend:</b>
 
 Create Env and install requirements.txt
 
-for frontend:
+<b>for frontend:</b>
 
 Go to Subtitle-app and type npm install and then npm run dev
 
