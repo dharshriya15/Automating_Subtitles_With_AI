@@ -2,31 +2,41 @@ import os
 import requests
 import time
 import uuid
-from flask import Flask, request, jsonify, send_file
-from werkzeug.utils import secure_filename
+import asyncio
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Dict, Any
 from moviepy import VideoFileClip, TextClip, CompositeVideoClip
 from moviepy.video.tools.subtitles import SubtitlesClip
 import datetime
 from groq import Groq
-# from python_dotenv import load_dotenv
 import subprocess
 from pydub import AudioSegment
 import threading
 import json
 
-# load_dotenv()
+app = FastAPI(
+    title="Video Subtitle API",
+    description="API for adding subtitles to videos using AI transcription",
+    version="1.0.0"
+)
 
-app = Flask(__name__)
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
 PROCESSED_FOLDER = 'processed'
 ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm'}
 MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500MB max file size
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['PROCESSED_FOLDER'] = PROCESSED_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
 # Create directories if they don't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -37,12 +47,27 @@ os.makedirs('temp', exist_ok=True)
 ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
 
 # Store processing status
-processing_status = {}
+processing_status: Dict[str, Dict[str, Any]] = {}
 
-def allowed_file(filename):
+# Pydantic models
+class JobStatus(BaseModel):
+    status: str
+    message: str
+    filename: str = None
+    uploaded_at: str = None
+
+class UploadResponse(BaseModel):
+    job_id: str
+    message: str
+    status_url: str
+
+class ErrorResponse(BaseModel):
+    error: str
+
+def allowed_file(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def get_llama_response(prompt):
+def get_llama_response(prompt: str) -> str:
     """Improved LLM response handling with retry logic"""
     max_retries = 3
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -71,7 +96,7 @@ def get_llama_response(prompt):
                 time.sleep(2 ** attempt)
     return None
 
-def transcribe_video_to_srt(video_path, srt_path, job_id):
+def transcribe_video_to_srt(video_path: str, srt_path: str, job_id: str) -> bool:
     """
     Transcribes the audio from a video file and saves it as an SRT subtitle file using AssemblyAI.
     """
@@ -152,7 +177,7 @@ def transcribe_video_to_srt(video_path, srt_path, job_id):
         processing_status[job_id]['message'] = f'Error during transcription: {str(e)}'
         return False
 
-def embed_subtitles_into_video(video_path, srt_path, output_path, job_id):
+def embed_subtitles_into_video(video_path: str, srt_path: str, output_path: str, job_id: str) -> bool:
     """
     Embeds an SRT subtitle file into a video file using moviepy.
     """
@@ -211,11 +236,11 @@ def embed_subtitles_into_video(video_path, srt_path, output_path, job_id):
         processing_status[job_id]['message'] = f'Error during video processing: {str(e)}'
         return False
 
-def process_video_async(video_path, job_id):
+def process_video_async(video_path: str, job_id: str):
     """Process video in background thread"""
     try:
-        srt_path = os.path.join(app.config['PROCESSED_FOLDER'], f"{job_id}.srt")
-        output_path = os.path.join(app.config['PROCESSED_FOLDER'], f"{job_id}_with_subtitles.mp4")
+        srt_path = os.path.join(PROCESSED_FOLDER, f"{job_id}.srt")
+        output_path = os.path.join(PROCESSED_FOLDER, f"{job_id}_with_subtitles.mp4")
         
         # Transcribe video to SRT
         if transcribe_video_to_srt(video_path, srt_path, job_id):
@@ -226,107 +251,176 @@ def process_video_async(video_path, job_id):
         processing_status[job_id]['status'] = 'error'
         processing_status[job_id]['message'] = f'Unexpected error: {str(e)}'
 
-@app.route('/', methods=['GET'])
-def index():
-    return jsonify({
+@app.get("/", response_model=dict)
+async def root():
+    """API information and available endpoints"""
+    return {
         'message': 'Video Subtitle API',
         'endpoints': {
             'POST /upload': 'Upload a video file for subtitle processing',
-            'GET /status/<job_id>': 'Check processing status',
-            'GET /download/<job_id>': 'Download processed video',
-            'GET /download/<job_id>/srt': 'Download SRT file'
+            'GET /status/{job_id}': 'Check processing status',
+            'GET /download/{job_id}': 'Download processed video',
+            'GET /download/{job_id}/srt': 'Download SRT file',
+            'GET /jobs': 'List all processing jobs',
+            'GET /docs': 'API documentation (Swagger UI)',
+            'GET /redoc': 'API documentation (ReDoc)'
         }
-    })
+    }
 
-@app.route('/upload', methods=['POST'])
-def upload_video():
-    if 'video' not in request.files:
-        return jsonify({'error': 'No video file provided'}), 400
+@app.post("/upload", response_model=UploadResponse)
+async def upload_video(
+    background_tasks: BackgroundTasks,
+    video: UploadFile = File(..., description="Video file to process")
+):
+    """Upload a video file for subtitle processing"""
     
-    file = request.files['video']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
+    # Check if file is provided
+    if not video.filename:
+        raise HTTPException(status_code=400, detail="No file selected")
     
-    if file and allowed_file(file.filename):
-        # Generate unique job ID
-        job_id = str(uuid.uuid4())
-        
-        # Save uploaded file
-        filename = secure_filename(file.filename)
-        file_extension = filename.rsplit('.', 1)[1].lower()
-        video_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{job_id}.{file_extension}")
-        file.save(video_path)
-        
-        # Initialize processing status
-        processing_status[job_id] = {
-            'status': 'queued',
-            'message': 'Video uploaded successfully, processing queued...',
-            'filename': filename,
-            'uploaded_at': datetime.datetime.now().isoformat()
-        }
-        
-        # Start background processing
-        thread = threading.Thread(target=process_video_async, args=(video_path, job_id))
-        thread.daemon = True
-        thread.start()
-        
-        return jsonify({
-            'job_id': job_id,
-            'message': 'Video uploaded successfully, processing started',
-            'status_url': f'/status/{job_id}'
-        }), 202
+    # Check file type
+    if not allowed_file(video.filename):
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid file type. Allowed: mp4, avi, mov, mkv, wmv, flv, webm"
+        )
     
-    return jsonify({'error': 'Invalid file type. Allowed: mp4, avi, mov, mkv, wmv, flv, webm'}), 400
+    # Check file size
+    if hasattr(video, 'size') and video.size > MAX_CONTENT_LENGTH:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 500MB")
+    
+    # Generate unique job ID
+    job_id = str(uuid.uuid4())
+    
+    # Save uploaded file
+    file_extension = video.filename.rsplit('.', 1)[1].lower()
+    video_path = os.path.join(UPLOAD_FOLDER, f"{job_id}.{file_extension}")
+    
+    try:
+        with open(video_path, "wb") as buffer:
+            content = await video.read()
+            buffer.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+    
+    # Initialize processing status
+    processing_status[job_id] = {
+        'status': 'queued',
+        'message': 'Video uploaded successfully, processing queued...',
+        'filename': video.filename,
+        'uploaded_at': datetime.datetime.now().isoformat()
+    }
+    
+    # Start background processing
+    background_tasks.add_task(process_video_async, video_path, job_id)
+    
+    return UploadResponse(
+        job_id=job_id,
+        message="Video uploaded successfully, processing started",
+        status_url=f"/status/{job_id}"
+    )
 
-@app.route('/status/<job_id>', methods=['GET'])
-def get_status(job_id):
+@app.get("/status/{job_id}", response_model=JobStatus)
+async def get_status(job_id: str):
+    """Check the processing status of a job"""
     if job_id not in processing_status:
-        return jsonify({'error': 'Job ID not found'}), 404
+        raise HTTPException(status_code=404, detail="Job ID not found")
     
-    return jsonify(processing_status[job_id])
+    return JobStatus(**processing_status[job_id])
 
-@app.route('/download/<job_id>', methods=['GET'])
-def download_video(job_id):
+@app.get("/download/{job_id}")
+async def download_video(job_id: str):
+    """Download the processed video with subtitles"""
     if job_id not in processing_status:
-        return jsonify({'error': 'Job ID not found'}), 404
+        raise HTTPException(status_code=404, detail="Job ID not found")
     
     if processing_status[job_id]['status'] != 'completed':
-        return jsonify({'error': 'Processing not completed yet'}), 400
+        raise HTTPException(status_code=400, detail="Processing not completed yet")
     
-    output_path = os.path.join(app.config['PROCESSED_FOLDER'], f"{job_id}_with_subtitles.mp4")
+    output_path = os.path.join(PROCESSED_FOLDER, f"{job_id}_with_subtitles.mp4")
     
     if not os.path.exists(output_path):
-        return jsonify({'error': 'Processed video file not found'}), 404
+        raise HTTPException(status_code=404, detail="Processed video file not found")
     
-    return send_file(output_path, as_attachment=True, download_name=f"{job_id}_with_subtitles.mp4")
+    return FileResponse(
+        path=output_path,
+        media_type='video/mp4',
+        filename=f"{job_id}_with_subtitles.mp4"
+    )
 
-@app.route('/download/<job_id>/srt', methods=['GET'])
-def download_srt(job_id):
+@app.get("/download/{job_id}/srt")
+async def download_srt(job_id: str):
+    """Download the SRT subtitle file"""
     if job_id not in processing_status:
-        return jsonify({'error': 'Job ID not found'}), 404
+        raise HTTPException(status_code=404, detail="Job ID not found")
     
     if processing_status[job_id]['status'] not in ['completed', 'embedding', 'rendering']:
-        return jsonify({'error': 'SRT file not ready yet'}), 400
+        raise HTTPException(status_code=400, detail="SRT file not ready yet")
     
-    srt_path = os.path.join(app.config['PROCESSED_FOLDER'], f"{job_id}.srt")
+    srt_path = os.path.join(PROCESSED_FOLDER, f"{job_id}.srt")
     
     if not os.path.exists(srt_path):
-        return jsonify({'error': 'SRT file not found'}), 404
+        raise HTTPException(status_code=404, detail="SRT file not found")
     
-    return send_file(srt_path, as_attachment=True, download_name=f"{job_id}.srt")
+    return FileResponse(
+        path=srt_path,
+        media_type='text/plain',
+        filename=f"{job_id}.srt"
+    )
 
-@app.route('/jobs', methods=['GET'])
-def list_jobs():
+@app.get("/jobs", response_model=dict)
+async def list_jobs():
     """List all processing jobs and their statuses"""
-    return jsonify(processing_status)
+    return processing_status
 
-@app.errorhandler(413)
-def too_large(e):
-    return jsonify({'error': 'File too large. Maximum size is 500MB'}), 413
+@app.delete("/jobs/{job_id}")
+async def delete_job(job_id: str):
+    """Delete a job and its associated files"""
+    if job_id not in processing_status:
+        raise HTTPException(status_code=404, detail="Job ID not found")
+    
+    # Remove files
+    files_to_remove = [
+        os.path.join(UPLOAD_FOLDER, f"{job_id}.*"),
+        os.path.join(PROCESSED_FOLDER, f"{job_id}.srt"),
+        os.path.join(PROCESSED_FOLDER, f"{job_id}_with_subtitles.mp4")
+    ]
+    
+    for file_pattern in files_to_remove:
+        import glob
+        for file_path in glob.glob(file_pattern):
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception as e:
+                print(f"Error removing file {file_path}: {e}")
+    
+    # Remove from processing status
+    del processing_status[job_id]
+    
+    return {"message": f"Job {job_id} and associated files deleted successfully"}
 
-@app.errorhandler(500)
-def internal_error(e):
-    return jsonify({'error': 'Internal server error'}), 500
+# Exception handlers
+@app.exception_handler(413)
+async def request_entity_too_large_handler(request, exc):
+    return JSONResponse(
+        status_code=413,
+        content={"error": "File too large. Maximum size is 500MB"}
+    )
+
+@app.exception_handler(500)
+async def internal_server_error_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error"}
+    )
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    import uvicorn
+    uvicorn.run(
+        "script:app",
+        host="0.0.0.0",
+        port=5000,
+        reload=True,
+        log_level="info"
+    )
