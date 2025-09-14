@@ -2,8 +2,7 @@ import os
 import requests
 import time
 import uuid
-import tempfile
-import shutil
+import asyncio
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,12 +11,14 @@ from typing import Dict, Any, Optional
 import datetime
 from groq import Groq
 import io
-import base64
 
+### Create FastAPI instance with custom docs and openapi url
 app = FastAPI(
     title="Video Subtitle API",
     description="Serverless API for video transcription and subtitle generation",
-    version="1.0.0"
+    version="1.0.0",
+    docs_url="/api/py/docs", 
+    openapi_url="/api/py/openapi.json"
 )
 
 # Add CORS middleware
@@ -54,6 +55,15 @@ class TranscriptionResponse(BaseModel):
     job_id: str
     status: str
     message: str
+
+class TranslateSRTRequest(BaseModel):
+    srt_content: str
+    target_language: str = "English"
+
+class TranslateSRTResponse(BaseModel):
+    original_content: str
+    translated_content: str
+    target_language: str
 
 class ErrorResponse(BaseModel):
     error: str
@@ -215,19 +225,19 @@ def format_time_srt(seconds: float) -> str:
     milliseconds = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
-@app.get("/", response_model=dict)
+@app.get("/api/py/")
 async def root():
     """API information and available endpoints"""
     return {
         "message": "Serverless Video Subtitle API",
         "version": "1.0.0",
         "endpoints": {
-            "POST /transcribe": "Upload audio/video for transcription",
-            "GET /status/{job_id}": "Check transcription status",
-            "GET /download/{job_id}": "Download SRT file",
-            "POST /translate-srt": "Translate existing SRT content",
-            "GET /jobs": "List recent jobs",
-            "GET /docs": "API documentation (Swagger UI)"
+            "POST /api/py/transcribe": "Upload audio/video for transcription",
+            "GET /api/py/status/{job_id}": "Check transcription status",
+            "GET /api/py/download/{job_id}": "Download SRT file",
+            "POST /api/py/translate-srt": "Translate existing SRT content",
+            "GET /api/py/jobs": "List recent jobs",
+            "GET /api/py/docs": "API documentation (Swagger UI)"
         },
         "limits": {
             "max_file_size": "25MB",
@@ -236,7 +246,12 @@ async def root():
         }
     }
 
-@app.post("/transcribe", response_model=TranscriptionResponse)
+@app.get("/api/py/hello")
+def hello_fast_api():
+    """Test endpoint to verify API is working"""
+    return {"message": "Hello from Video Subtitle API", "status": "healthy"}
+
+@app.post("/api/py/transcribe", response_model=TranscriptionResponse)
 async def transcribe_file(
     file: UploadFile = File(..., description="Audio or video file to transcribe")
 ):
@@ -295,7 +310,7 @@ async def transcribe_file(
             "status": "completed",
             "message": "Transcription completed successfully",
             "srt_content": srt_content,
-            "download_url": f"/download/{job_id}"
+            "download_url": f"/api/py/download/{job_id}"
         })
         
         return TranscriptionResponse(
@@ -315,7 +330,7 @@ async def transcribe_file(
             })
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
-@app.get("/status/{job_id}", response_model=JobStatus)
+@app.get("/api/py/status/{job_id}", response_model=JobStatus)
 async def get_job_status(job_id: str):
     """Get the status of a transcription job"""
     if job_id not in processing_jobs:
@@ -323,7 +338,7 @@ async def get_job_status(job_id: str):
     
     return JobStatus(**processing_jobs[job_id])
 
-@app.get("/download/{job_id}")
+@app.get("/api/py/download/{job_id}")
 async def download_srt(job_id: str):
     """Download the SRT file for a completed job"""
     if job_id not in processing_jobs:
@@ -337,25 +352,16 @@ async def download_srt(job_id: str):
     if not job.get("srt_content"):
         raise HTTPException(status_code=404, detail="SRT content not available")
     
-    # Create file stream
-    srt_stream = io.StringIO(job["srt_content"])
-    
-    def iter_file():
-        yield job["srt_content"].encode('utf-8')
-    
     return StreamingResponse(
         io.BytesIO(job["srt_content"].encode('utf-8')),
         media_type="text/plain",
         headers={"Content-Disposition": f"attachment; filename={job_id}.srt"}
     )
 
-@app.post("/translate-srt")
-async def translate_srt_content(
-    srt_content: str,
-    target_language: str = "English"
-):
+@app.post("/api/py/translate-srt", response_model=TranslateSRTResponse)
+async def translate_srt_content(request: TranslateSRTRequest):
     """Translate SRT content to specified language using Groq"""
-    if not srt_content.strip():
+    if not request.srt_content.strip():
         raise HTTPException(status_code=400, detail="No SRT content provided")
     
     if not os.getenv("GROQ_API_KEY"):
@@ -363,12 +369,12 @@ async def translate_srt_content(
     
     try:
         prompt = f"""
-        Translate the following SRT subtitle content to {target_language}. 
+        Translate the following SRT subtitle content to {request.target_language}. 
         Maintain the exact SRT format with timestamps and numbering.
         Only translate the text content, keep all timing information unchanged.
         
         SRT Content:
-        {srt_content}
+        {request.srt_content}
         """
         
         translated_content = get_llama_response(prompt)
@@ -376,16 +382,16 @@ async def translate_srt_content(
         if not translated_content:
             raise HTTPException(status_code=500, detail="Translation failed")
         
-        return {
-            "original_content": srt_content,
-            "translated_content": translated_content,
-            "target_language": target_language
-        }
+        return TranslateSRTResponse(
+            original_content=request.srt_content,
+            translated_content=translated_content,
+            target_language=request.target_language
+        )
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Translation error: {str(e)}")
 
-@app.get("/jobs")
+@app.get("/api/py/jobs")
 async def list_jobs():
     """List recent transcription jobs"""
     return {
@@ -393,7 +399,7 @@ async def list_jobs():
         "jobs": list(processing_jobs.values())
     }
 
-@app.delete("/jobs/{job_id}")
+@app.delete("/api/py/jobs/{job_id}")
 async def delete_job(job_id: str):
     """Delete a job from memory"""
     if job_id not in processing_jobs:
@@ -402,14 +408,17 @@ async def delete_job(job_id: str):
     del processing_jobs[job_id]
     return {"message": f"Job {job_id} deleted successfully"}
 
-# Health check endpoint
-@app.get("/health")
+@app.get("/api/py/health")
 async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
         "timestamp": datetime.datetime.now().isoformat(),
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "environment": {
+            "assemblyai_configured": bool(os.getenv("ASSEMBLYAI_API_KEY")),
+            "groq_configured": bool(os.getenv("GROQ_API_KEY"))
+        }
     }
 
 # Exception handlers
@@ -426,9 +435,3 @@ async def internal_server_error_handler(request, exc):
         status_code=500,
         content={"error": "Internal server error", "detail": str(exc)}
     )
-
-# For Vercel deployment
-import asyncio
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5000)
