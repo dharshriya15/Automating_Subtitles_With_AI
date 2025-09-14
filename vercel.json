@@ -1,13 +1,13 @@
 {
   "functions": {
-    "script.py": {
-      "runtime": "python3.11"
+    "main.py": {
+      "runtime": "python3.12"
     }
   },
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "/script.py"
+      "dest": "/main.py"
     }
   ]
 }
