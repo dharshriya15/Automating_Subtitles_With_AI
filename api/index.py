@@ -17,8 +17,8 @@ app = FastAPI(
     title="Video Subtitle API",
     description="Serverless API for video transcription and subtitle generation",
     version="1.0.0",
-    docs_url="/api/py/docs", 
-    openapi_url="/api/py/openapi.json"
+    docs_url="/docs", 
+    openapi_url="/openapi.json"
 )
 
 # Add CORS middleware
@@ -225,19 +225,19 @@ def format_time_srt(seconds: float) -> str:
     milliseconds = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
-@app.get("/api/py/")
+@app.get("/")
 async def root():
     """API information and available endpoints"""
     return {
         "message": "Serverless Video Subtitle API",
         "version": "1.0.0",
         "endpoints": {
-            "POST /api/py/transcribe": "Upload audio/video for transcription",
-            "GET /api/py/status/{job_id}": "Check transcription status",
-            "GET /api/py/download/{job_id}": "Download SRT file",
-            "POST /api/py/translate-srt": "Translate existing SRT content",
-            "GET /api/py/jobs": "List recent jobs",
-            "GET /api/py/docs": "API documentation (Swagger UI)"
+            "POST /transcribe": "Upload audio/video for transcription",
+            "GET /status/{job_id}": "Check transcription status",
+            "GET /download/{job_id}": "Download SRT file",
+            "POST /translate-srt": "Translate existing SRT content",
+            "GET /jobs": "List recent jobs",
+            "GET /docs": "API documentation (Swagger UI)"
         },
         "limits": {
             "max_file_size": "25MB",
@@ -246,12 +246,12 @@ async def root():
         }
     }
 
-@app.get("/api/py/hello")
+@app.get("/hello")
 def hello_fast_api():
     """Test endpoint to verify API is working"""
     return {"message": "Hello from Video Subtitle API", "status": "healthy"}
 
-@app.post("/api/py/transcribe", response_model=TranscriptionResponse)
+@app.post("/transcribe", response_model=TranscriptionResponse)
 async def transcribe_file(
     file: UploadFile = File(..., description="Audio or video file to transcribe")
 ):
@@ -310,7 +310,7 @@ async def transcribe_file(
             "status": "completed",
             "message": "Transcription completed successfully",
             "srt_content": srt_content,
-            "download_url": f"/api/py/download/{job_id}"
+            "download_url": f"/download/{job_id}"
         })
         
         return TranscriptionResponse(
@@ -330,7 +330,7 @@ async def transcribe_file(
             })
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
-@app.get("/api/py/status/{job_id}", response_model=JobStatus)
+@app.get("/status/{job_id}", response_model=JobStatus)
 async def get_job_status(job_id: str):
     """Get the status of a transcription job"""
     if job_id not in processing_jobs:
@@ -338,7 +338,7 @@ async def get_job_status(job_id: str):
     
     return JobStatus(**processing_jobs[job_id])
 
-@app.get("/api/py/download/{job_id}")
+@app.get("/download/{job_id}")
 async def download_srt(job_id: str):
     """Download the SRT file for a completed job"""
     if job_id not in processing_jobs:
@@ -358,7 +358,7 @@ async def download_srt(job_id: str):
         headers={"Content-Disposition": f"attachment; filename={job_id}.srt"}
     )
 
-@app.post("/api/py/translate-srt", response_model=TranslateSRTResponse)
+@app.post("/translate-srt", response_model=TranslateSRTResponse)
 async def translate_srt_content(request: TranslateSRTRequest):
     """Translate SRT content to specified language using Groq"""
     if not request.srt_content.strip():
@@ -391,7 +391,7 @@ async def translate_srt_content(request: TranslateSRTRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Translation error: {str(e)}")
 
-@app.get("/api/py/jobs")
+@app.get("/jobs")
 async def list_jobs():
     """List recent transcription jobs"""
     return {
@@ -399,7 +399,7 @@ async def list_jobs():
         "jobs": list(processing_jobs.values())
     }
 
-@app.delete("/api/py/jobs/{job_id}")
+@app.delete("/jobs/{job_id}")
 async def delete_job(job_id: str):
     """Delete a job from memory"""
     if job_id not in processing_jobs:
@@ -408,7 +408,7 @@ async def delete_job(job_id: str):
     del processing_jobs[job_id]
     return {"message": f"Job {job_id} deleted successfully"}
 
-@app.get("/api/py/health")
+@app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {
